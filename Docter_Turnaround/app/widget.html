@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claim Turnaround Time Report</title>
+  <link rel="stylesheet" href="./style.css">
+  <!-- Zoho Creator SDK -->
+  <script src="https://js.zohostatic.com/creator/sdk/v1.0/ZohoEmbededAppSDK.min.js"></script>
+  <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk.js"></script>
+  <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+  <!-- Excel Export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- PDF Export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+</head>
+
+<body>
+
+<!-- LOADING OVERLAY -->
+<div id="fxLoader" class="fx-loader is-active" role="status" aria-live="polite">
+  <div class="fx-grid"></div>
+
+  <div class="fx-panel">
+    <span class="fx-corner tl"></span><span class="fx-corner tr"></span>
+    <span class="fx-corner bl"></span><span class="fx-corner br"></span>
+    <span class="fx-scan"></span>
+
+    <div class="fx-orb">
+      <span class="fx-ring fx-ring--1"></span>
+      <span class="fx-ring fx-ring--2"></span>
+      <span class="fx-ring fx-ring--3"></span>
+      <span class="fx-orbit"><i></i></span>
+      <span class="fx-core fx-core--logo"><img
+          src="https://creatorapp.zohopublic.com.au/file//medielveservices455/claims-management//All_Images/31559000000025010/Logo/image-download/PFxHZm68ZwuMKfkZz7yNOH7BZEes8UQN5ETOHD0bVY8Njqf0b9Zw5ZTe2XUK0CONRVfdmbQ9wteQdDnbWNCN4kVaeRZQhFrE6Tp5?filepath=/1774517256590556_Logo_design_with_green_leaf_accent.png"
+          alt="Medi Elves"></span>
+    </div>
+
+    <h3 class="fx-title">
+      Loading claims data
+      <span class="fx-dots"><i></i><i></i><i></i></span>
+    </h3>
+
+    <p class="fx-status"><span id="fxStatus">Initializing secure connection</span></p>
+
+    <div class="fx-bar"><span id="fxBarFill"></span></div>
+    <div class="fx-meta"><span>DATA SYNC</span><span id="fxPct">0%</span></div>
+  </div>
+</div>
+  <div class="container">
+
+    <header class="report-header">
+      <div class="report-header-inner">
+        <div class="report-header-brand">
+          <img
+            src="https://creatorapp.zohopublic.com.au/file//medielveservices455/claims-management//All_Images/31559000000025010/Logo/image-download/PFxHZm68ZwuMKfkZz7yNOH7BZEes8UQN5ETOHD0bVY8Njqf0b9Zw5ZTe2XUK0CONRVfdmbQ9wteQdDnbWNCN4kVaeRZQhFrE6Tp5?filepath=/1774517256590556_Logo_design_with_green_leaf_accent.png"
+            alt="Logo" class="report-logo">
+        </div>
+        <div class="report-header-title">
+          <span class="report-header-spacer"></span>
+          <h1>Claims Turnaround Time Report</h1>
+        </div>
+      </div>
+    </header>
+
+    <!-- FILTERS -->
+    <div class="filter-card">
+      <div class="filter-grid">
+
+        <div class="filter-group">
+          <label>Doctor</label>
+          <div id="f-doctor"></div>
+        </div>
+
+        <div class="filter-group">
+          <label>Hospital</label>
+          <div id="f-location"></div>
+        </div>
+
+        <div class="filter-group">
+          <label>Patient</label>
+          <div id="f-patient"></div>
+        </div>
+
+        <div class="filter-group">
+          <label>Payer</label>
+          <div id="f-payer"></div>
+        </div>
+
+        <div class="filter-group">
+          <label>From Date</label>
+          <input type="date" id="f-from" />
+        </div>
+
+        <div class="filter-group">
+          <label>To Date</label>
+          <input type="date" id="f-to" />
+        </div>
+
+      </div>
+
+      <div class="action-row">
+        <button class="btn btn-primary" onclick="runReport()">Update</button>
+        <button class="btn btn-reset" onclick="resetFilters()">Reset</button>
+
+        <button class="btn btn-pdf" onclick="exportPDF()" type="button">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;vertical-align:middle">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+          </svg>
+          Export PDF
+        </button>
+
+        <button class="btn btn-excel" onclick="exportExcel()" type="button">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;vertical-align:middle">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="3" y1="9" x2="21" y2="9"></line>
+            <line x1="3" y1="15" x2="21" y2="15"></line>
+            <line x1="9" y1="3" x2="9" y2="21"></line>
+          </svg>
+          Export Excel
+        </button>
+      </div>
+    </div>
+
+    <!-- AVERAGE TURNAROUND BAR -->
+    <div id="avg-turnaround-bar" class="avg-turnaround-bar" style="display:none;">
+      <div class="avg-turnaround-inner">
+        <span class="avg-turnaround-label">Average Payment Turnaround</span>
+        <span class="avg-turnaround-value" id="avg-turnaround-value">- Days</span>
+      </div>
+    </div>
+
+    <!-- TABLE -->
+    <div class="table-card">
+      <div class="table-scroll">
+        <table>
+          <colgroup>
+            <col style="width:7%">    <!-- Claim ID -->
+            <col style="width:14%">   <!-- Doctor -->
+            <col style="width:15%">   <!-- Hospital -->
+            <col style="width:12%">   <!-- Patient -->
+            <col style="width:12%">   <!-- Payer -->
+            <col style="width:8%">    <!-- Claim Lodgement Date -->
+            <col style="width:6%">    <!-- Item No -->
+            <col style="width:8%">    <!-- Date of Service -->
+            <col style="width:8%">    <!-- Payment Date -->
+            <col style="width:10%">   <!-- Payment Turnaround (Days) -->
+          </colgroup>
+          <thead>
+            <tr>
+              <th style="text-align:center">Claim ID</th>
+              <th>Doctor</th>
+              <th>Hospital</th>
+              <th>Patient</th>
+              <th>Payer</th>
+              <th style="text-align:center">Claim<br>Lodgement Date</th>
+              <th style="text-align:center">Item No</th>
+              <th style="text-align:center">Date of<br>Service</th>
+              <th style="text-align:center">Payment<br>Date</th>
+              <th class="sortable-col" id="th-turnaround" onclick="toggleTurnaroundSort()" title="Click to sort by Payment Turnaround Days" style="text-align:center">
+                <div class="sort-header-wrapper">
+                  <span>Payment Turnaround<br>(Days)</span>
+                  <span class="sort-icon" id="sort-icon-turnaround">&#8597;</span>
+                </div>
+              </th>
+            </tr>
+          </thead>
+          <tbody id="report-body">
+            <tr>
+              <td colspan="10">No data</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <script src="./script.js"></script>
+</body>
+
+</html>
