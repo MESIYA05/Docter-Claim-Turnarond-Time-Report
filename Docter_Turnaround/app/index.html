@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claim Turnaround Time Report</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+</head>
+<body>
+
+<div id="fxLoader" class="fx-loader is-active" role="status" aria-live="polite">
+  <div class="fx-grid"></div>
+  <div class="fx-panel">
+    <span class="fx-corner tl"></span><span class="fx-corner tr"></span>
+    <span class="fx-corner bl"></span><span class="fx-corner br"></span>
+    <span class="fx-scan"></span>
+    <div class="fx-orb">
+      <span class="fx-ring fx-ring--1"></span>
+      <span class="fx-ring fx-ring--2"></span>
+      <span class="fx-ring fx-ring--3"></span>
+      <span class="fx-orbit"><i></i></span>
+      <span class="fx-core"></span>
+    </div>
+    <h3 class="fx-title">Loading claims data
+      <span class="fx-dots"><i></i><i></i><i></i></span>
+    </h3>
+    <p class="fx-status"><span id="fxStatus">Initializing secure connection</span></p>
+    <div class="fx-bar"><span id="fxBarFill"></span></div>
+    <div class="fx-meta"><span>DATA SYNC</span><span id="fxPct">0%</span></div>
+  </div>
+</div>
+
+<div class="container">
+
+  <header class="report-header">
+    <div class="report-header-inner">
+      <div class="report-header-brand">
+        <img id="header-logo" alt="Logo" class="report-logo">
+      </div>
+      <div class="report-header-title">
+        <h1>Claims Turnaround Time Report</h1>
+      </div>
+    </div>
+  </header>
+
+  <div class="filter-card">
+    <div class="filter-grid">
+      <div class="filter-group">
+        <label>Doctor</label>
+        <div id="f-doctor-display" class="doctor-readonly">—</div>
+      </div>
+      <div class="filter-group">
+        <label>Hospital</label>
+        <div id="f-location"></div>
+      </div>
+      <div class="filter-group">
+        <label>Patient</label>
+        <div id="f-patient"></div>
+      </div>
+      <div class="filter-group">
+        <label>Payer</label>
+        <div id="f-payer"></div>
+      </div>
+      <div class="filter-group">
+        <label>From Date</label>
+        <input type="date" id="f-from" />
+      </div>
+      <div class="filter-group">
+        <label>To Date</label>
+        <input type="date" id="f-to" />
+      </div>
+    </div>
+
+    <div class="action-row">
+      <button class="btn btn-primary" onclick="runReport()" type="button">Update</button>
+      <button class="btn btn-reset" onclick="resetFilters()" type="button">Reset</button>
+      <button class="btn btn-pdf" onclick="exportPDF()" type="button">Export PDF</button>
+      <button class="btn btn-excel" onclick="exportExcel()" type="button">Export Excel</button>
+    </div>
+  </div>
+
+  <div id="avg-turnaround-bar" class="avg-turnaround-bar" style="display:none;">
+    <div class="avg-turnaround-inner">
+      <span class="avg-turnaround-label">Average Payment Turnaround</span>
+      <span class="avg-turnaround-value" id="avg-turnaround-value">- Days</span>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <div class="table-scroll">
+      <table>
+        <colgroup>
+          <col style="width:7%"><col style="width:14%"><col style="width:15%">
+          <col style="width:12%"><col style="width:12%"><col style="width:8%">
+          <col style="width:6%"><col style="width:8%"><col style="width:8%">
+          <col style="width:10%">
+        </colgroup>
+        <thead>
+          <tr>
+            <th style="text-align:center">Claim ID</th>
+            <th>Doctor</th>
+            <th>Hospital</th>
+            <th>Patient</th>
+            <th>Payer</th>
+            <th style="text-align:center">Claim<br>Lodgement Date</th>
+            <th style="text-align:center">Item No</th>
+            <th style="text-align:center">Date of<br>Service</th>
+            <th style="text-align:center">Payment<br>Date</th>
+            <th class="sortable-col" onclick="toggleTurnaroundSort()" title="Click to sort" style="text-align:center">
+              <div class="sort-header-wrapper">
+                <span>Payment Turnaround<br>(Days)</span>
+                <span class="sort-icon" id="sort-icon-turnaround">&#8597;</span>
+              </div>
+            </th>
+          </tr>
+        </thead>
+        <tbody id="report-body">
+          <tr><td colspan="10">No data</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="./script.js"></script>
+</body>
+</html>
