@@ -63,12 +63,7 @@ body {
   color: var(--text-main);
   -webkit-font-smoothing: antialiased;
 }
-.doctor-readonly{
-  height:40px; display:flex; align-items:center; padding:0 11px;
-  border:1.5px solid var(--border); border-radius:var(--radius-sm);
-  background:var(--row-alt); font-weight:600; color:var(--ink-700);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-}
+
 .container {
   padding-bottom: 48px;
   max-width: 1440px;
@@ -512,6 +507,26 @@ input[type="date"]:focus {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(91, 62, 245, .14);
+}
+
+.doctor-readonly {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 40px;
+  padding: 0 11px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-main);
+  background: var(--surface-soft, #f8f9fa);
+  user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .filter-date-row {
