@@ -47,14 +47,14 @@ async function ensureAllItemsLoaded() {
   ALL_ITEMS_LOADING = (async () => {
     let items;
     try {
-      items = await fetchAllRecords("Add_Item_Report", {
+      items = await fetchAllRecords("Items", {
         field_config: "custom",
         fields: ITEM_FIELDS
       });
     } catch (err) {
       console.warn("Custom-field full item load failed, retrying with all fields:", err);
       try {
-        items = await fetchAllRecords("Add_Item_Report", { field_config: "all" });
+        items = await fetchAllRecords("Items", { field_config: "all" });
       } catch (err2) {
         console.error("Failed to load full item catalog:", err2);
         items = [];
@@ -404,7 +404,7 @@ document.addEventListener("DOMContentLoaded", async function () {
 async function loadInitialItemNumbers() {
   try {
     const resp = await ZOHO.CREATOR.DATA.getRecords({
-      report_name: "Add_Item_Report",
+      report_name: "Items",
       field_config: "custom",
       fields: ITEM_FIELDS,   // "Item,Type_field,Description"
       max_records: 200
@@ -414,7 +414,7 @@ async function loadInitialItemNumbers() {
     console.warn("Custom-field initial item load failed, retrying with all fields:", err);
     try {
       const resp = await ZOHO.CREATOR.DATA.getRecords({
-        report_name: "Add_Item_Report",
+        report_name: "Items",
         field_config: "all",
         max_records: 200
       });
@@ -449,7 +449,7 @@ async function searchItemNumbersRemote(query) {
         })
       : items.slice(0, 200); // show first 200 until user types
 
-    setItemNumberOptions(filtered); // rebuilds the checkbox list from Add_Item_Report data
+    setItemNumberOptions(filtered); // rebuilds the checkbox list from Items data
   } catch (err) {
     console.error("Item number search failed:", err);
   } finally {
@@ -2118,7 +2118,7 @@ function resetFilters() {
 const ITEM_FETCH_BATCH_SIZE  = 40;
 // How many batch requests run at the same time
 const ITEM_FETCH_CONCURRENCY = 5;
-// Only these fields are pulled from Add_Item_Report (ID is always included).
+// Only these fields are pulled from Items (ID is always included).
 // Change "Type_field" if your type field has a different API name.
 // Only these fields are pulled from Add_Item_Report (ID is always included).
 const ITEM_FIELDS = "Item,Type_field,Description";
@@ -2208,7 +2208,7 @@ function collectClaimItemIds(claims) {
 async function fetchItemBatch(idBatch) {
   const criteria = "(" + idBatch.map(id => `ID == ${id}`).join(" || ") + ")";
   const base = {
-    report_name: "Add_Item_Report",
+    report_name: "Items",
     criteria: criteria,
     max_records: 200
   };
