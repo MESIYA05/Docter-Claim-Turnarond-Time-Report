@@ -178,6 +178,61 @@
       </div>
     </div>
   </div>
+
+  <!-- MOBILE EXPORT MODAL -->
+  <div id="export-modal" class="me-modal-overlay" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="me-modal-card">
+      <div class="me-modal-header">
+        <div class="me-modal-title-wrap">
+          <div id="modal-file-icon" class="export-option-icon pdf-icon">PDF</div>
+          <div>
+            <h3 class="me-modal-title">Report Ready</h3>
+            <p class="me-modal-subtitle">Download or save to your mobile device</p>
+          </div>
+        </div>
+        <button type="button" class="me-modal-close" id="modal-close-btn" aria-label="Close modal">&times;</button>
+      </div>
+
+      <div class="me-modal-body">
+        <div class="me-file-card">
+          <div class="me-file-name" id="modal-file-name">Claims Turnaround Time Report.pdf</div>
+          <div class="me-file-meta">
+            <span class="me-badge me-badge-size" id="modal-file-size">0 KB</span>
+            <span class="me-badge me-badge-success">✓ Saved in Local Storage</span>
+          </div>
+          <div class="me-storage-hint">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span>Storage Path: <code id="modal-storage-path">localStorage &bull; IndexedDB</code></span>
+          </div>
+        </div>
+
+        <div class="me-action-list">
+          <!-- Direct Download Link -->
+          <a class="me-action-btn me-btn-download" id="modal-download-btn" href="#" download="" target="_blank">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            <div class="me-action-text">
+              <strong>Download File Directly</strong>
+              <small>Tap to download report to your device</small>
+            </div>
+          </a>
+        </div>
+      </div>
+
+      <div class="me-modal-footer">
+        <button type="button" class="btn btn-reset" id="modal-done-btn">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="me-toast" class="me-toast" role="status" aria-live="polite"></div>
+
   <script src="./script.js"></script>
 </body>
 

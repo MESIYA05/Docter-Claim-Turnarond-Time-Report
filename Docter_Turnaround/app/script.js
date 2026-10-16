@@ -138,9 +138,8 @@ async function zohoGetRecords(config, retries = 4) {
 }
 
 function loadLogoAsDataURL() {
-  // No fetch/CORS involved â€” just resolve the embedded base64 directly.
   LOGO_DATA_URL = MEDI_ELVES_LOGO_BASE64;
-  return Promise.resolve(LOGO_DATA_URL);
+  return LOGO_DATA_URL;
 }
 
 // "MARIA ANITA FERRER - 29 Sept 1962"  ->  "MARIA ANITA FERRER"
@@ -231,6 +230,22 @@ document.addEventListener("DOMContentLoaded", async function () {
   initSearchableSelect("f-location", "All Hospitals");
   initSearchableSelect("f-patient",  "All Patients");
   initSearchableSelect("f-payer",    "All Payers");
+
+  // Export modal close listeners
+  const modalCloseBtn = document.getElementById("modal-close-btn");
+  if (modalCloseBtn) {
+    modalCloseBtn.onclick = () => closeMobileExportModal();
+  }
+  const modalDoneBtn = document.getElementById("modal-done-btn");
+  if (modalDoneBtn) {
+    modalDoneBtn.onclick = () => closeMobileExportModal();
+  }
+  const exportModal = document.getElementById("export-modal");
+  if (exportModal) {
+    exportModal.onclick = (e) => {
+      if (e.target === exportModal) closeMobileExportModal();
+    };
+  }
 
   try {
     if (typeof ZOHO === "undefined") {
@@ -1795,141 +1810,490 @@ const XLSX_BRAND = {
 };
 
 /* ===================================================
+   MOBILE EXPORT & LOCAL STORAGE HELPERS
+   =================================================== */
+
+const LOCAL_STORAGE_PDF_KEY = "medi_elves_saved_pdf";
+const LOCAL_STORAGE_EXCEL_KEY = "medi_elves_saved_excel";
+
+let CURRENT_ACTIVE_BLOB_URL = null;
+let CURRENT_EXPORT_DATA = null;
+
+function isMobileDevice() {
+  const ua = navigator.userAgent || navigator.vendor || window.opera || "";
+  const isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+  const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile|CriOS/i.test(ua);
+  return Boolean(isMobileUA || (isTouch && window.innerWidth <= 1024));
+}
+
+function isIOS() {
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dataUrlToBlob(dataUrl, fallbackMime) {
+  try {
+    const parts = dataUrl.split(",");
+    const mimeMatch = parts[0].match(/:(.*?);/);
+    const mime = (mimeMatch && mimeMatch[1]) || fallbackMime;
+    const bstr = atob(parts[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  } catch (e) {
+    console.error("Error converting dataUrl to Blob:", e);
+    return null;
+  }
+}
+
+/* --- IndexedDB for Persistent Device Storage Path --- */
+function openExportDB() {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) {
+      resolve(null);
+      return;
+    }
+    try {
+      const request = indexedDB.open("MediElvesExportDB", 1);
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("exports")) {
+          db.createObjectStore("exports", { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+async function saveExportToIndexedDB(id, record) {
+  try {
+    const db = await openExportDB();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      const tx = db.transaction("exports", "readwrite");
+      const store = tx.objectStore("exports");
+      store.put({ id, ...record });
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch (e) {
+    console.warn("IndexedDB save error:", e);
+    return false;
+  }
+}
+
+async function saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl) {
+  const isPdf = type === "pdf";
+  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+  const now = new Date();
+  const meta = {
+    filename,
+    mimeType,
+    type,
+    size: blob.size,
+    timestamp: now.toISOString(),
+    dateLabel: now.toLocaleString("en-AU", {
+      timeZone: "Australia/Sydney",
+      day: "2-digit", month: "short", year: "numeric",
+      hour: "numeric", minute: "2-digit", hour12: true
+    })
+  };
+
+  try {
+    if (dataUrl) {
+      localStorage.setItem(key, dataUrl);
+    }
+    localStorage.setItem(key + "_meta", JSON.stringify(meta));
+  } catch (e) {
+    console.warn("localStorage quota exceeded for dataUrl, relying on IndexedDB:", e);
+    try {
+      localStorage.setItem(key + "_meta", JSON.stringify(meta));
+    } catch (e2) {}
+  }
+
+  await saveExportToIndexedDB(key, {
+    blob,
+    dataUrl,
+    meta
+  });
+
+  return { key, meta, dataUrl };
+}
+
+/* --- Web Share API & Native File Downloads --- */
+function canShareFile(file) {
+  try {
+    return Boolean(
+      navigator.share &&
+      navigator.canShare &&
+      navigator.canShare({ files: [file] })
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function triggerBrowserDownload(blob, filename) {
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.style.display = "none";
+  a.href = blobUrl;
+  a.download = filename;
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    } catch (e) {}
+  }, 60000);
+}
+
+function showToast(message, duration = 3000) {
+  const toast = document.getElementById("me-toast");
+  if (!toast) return;
+  toast.textContent = message;
+  toast.classList.add("show");
+  clearTimeout(toast._timeout);
+  toast._timeout = setTimeout(() => {
+    toast.classList.remove("show");
+  }, duration);
+}
+
+function showMobileExportModal(exportData) {
+  const modal = document.getElementById("export-modal");
+  if (!modal) return;
+
+  const iconEl = document.getElementById("modal-file-icon");
+  if (iconEl) {
+    if (exportData.type === "pdf") {
+      iconEl.className = "export-option-icon pdf-icon";
+      iconEl.textContent = "PDF";
+    } else {
+      iconEl.className = "export-option-icon excel-icon";
+      iconEl.textContent = "XLS";
+    }
+  }
+
+  const nameEl = document.getElementById("modal-file-name");
+  if (nameEl) nameEl.textContent = exportData.filename;
+
+  const sizeEl = document.getElementById("modal-file-size");
+  if (sizeEl) sizeEl.textContent = formatBytes(exportData.size);
+
+  const pathEl = document.getElementById("modal-storage-path");
+  if (pathEl) {
+    pathEl.innerHTML = `localStorage['medi_elves_saved_${exportData.type}'] &bull; IndexedDB`;
+  }
+
+  const dlBtn = document.getElementById("modal-download-btn");
+  if (dlBtn) {
+    dlBtn.download = exportData.filename;
+    dlBtn.href = exportData.dataUrl || exportData.blobUrl;
+    dlBtn.onclick = async (e) => {
+      // iPhone / iPad: WebKit blocks <a download> inside iframes.
+      // Calling navigator.share on direct tap opens Apple's native "Save to Files" dialog.
+      if (isIOS()) {
+        let fileToShare = exportData.fileObj;
+        if (!fileToShare) {
+          try {
+            fileToShare = new File([exportData.blob], exportData.filename, {
+              type: exportData.mimeType,
+              lastModified: Date.now()
+            });
+          } catch (err) {}
+        }
+
+        if (fileToShare && canShareFile(fileToShare)) {
+          e.preventDefault();
+          try {
+            await navigator.share({
+              files: [fileToShare],
+              title: exportData.filename
+            });
+            showToast("Saved successfully!");
+            setTimeout(() => closeMobileExportModal(), 800);
+            return;
+          } catch (err) {
+            if (err.name === "AbortError") {
+              return; // User cancelled
+            }
+            console.warn("iOS share fallback:", err);
+          }
+        }
+
+        // iOS fallback if share fails: open in new tab so iOS viewer can save
+        if (exportData.type === "pdf") {
+          e.preventDefault();
+          window.open(exportData.blobUrl, "_blank");
+          setTimeout(() => closeMobileExportModal(), 800);
+          return;
+        }
+      }
+
+      // Android & Desktop: Direct download trigger
+      triggerBrowserDownload(exportData.blob, exportData.filename);
+      showToast("Downloading " + exportData.filename);
+      setTimeout(() => {
+        closeMobileExportModal();
+      }, 1000);
+    };
+  }
+
+  modal.classList.add("open");
+}
+
+function closeMobileExportModal() {
+  const modal = document.getElementById("export-modal");
+  if (modal) modal.classList.remove("open");
+}
+
+async function handleFileExport({ blob, filename, mimeType, type }) {
+  if (CURRENT_ACTIVE_BLOB_URL) {
+    try { URL.revokeObjectURL(CURRENT_ACTIVE_BLOB_URL); } catch (e) {}
+    CURRENT_ACTIVE_BLOB_URL = null;
+  }
+
+  const blobUrl = URL.createObjectURL(blob);
+  CURRENT_ACTIVE_BLOB_URL = blobUrl;
+
+  let dataUrl = "";
+  try {
+    dataUrl = await blobToDataUrl(blob);
+  } catch (e) {
+    console.warn("Could not create dataUrl:", e);
+  }
+
+  await saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl);
+
+  let fileObj = null;
+  try {
+    fileObj = new File([blob], filename, { type: mimeType, lastModified: Date.now() });
+  } catch (e) {}
+
+  CURRENT_EXPORT_DATA = {
+    blob,
+    blobUrl,
+    dataUrl,
+    fileObj,
+    filename,
+    mimeType,
+    type,
+    size: blob.size,
+    date: new Date()
+  };
+
+  const isMobile = isMobileDevice();
+
+  if (isMobile) {
+    showMobileExportModal(CURRENT_EXPORT_DATA);
+    if (!isIOS()) {
+      try {
+        triggerBrowserDownload(blob, filename);
+      } catch (e) {}
+    }
+  } else {
+    try {
+      triggerBrowserDownload(blob, filename);
+      showToast("Report downloaded successfully!");
+    } catch (e) {
+      showMobileExportModal(CURRENT_EXPORT_DATA);
+    }
+  }
+}
+
+/* ===================================================
    EXPORT TO EXCEL
    =================================================== */
-function exportExcel() {
+async function exportExcel() {
   const rows = getExportRows();
   if (!rows.length) { alert("No data to export."); return; }
 
-  const info = getActiveFilterInfo();
-  const aoa = [];
-
-  aoa.push(["Claims Turnaround Time Report"]);
-  aoa.push([`Doctor: ${info.doctor || "All"}`]);
-  aoa.push([`Hospital: ${info.hospital || "All"}`]);
-  aoa.push([`Date Range: ${formatDateRange(info.dateFrom, info.dateTo)}`]);
-  aoa.push([`Generated On: ${new Date().toLocaleString("en-AU", {
-    timeZone: "Australia/Sydney",
-    day: "2-digit", month: "short", year: "numeric",
-    hour: "numeric", minute: "2-digit", hour12: true
-  })}`]);
-  aoa.push([]);
-
-  const HEADER_ROW = aoa.length;
-  aoa.push([
-    "Claim ID", "Doctor", "Hospital", "Patient", "Payer", "Claim Date",
-    "Item No", "Date of Service", "Payment Date", "Payment Turnaround (Days)"
-  ]);
-
-
-  const DATA_START_ROW = aoa.length;
-  const groupBoundaryRows = [];
-
-FILTERED_DATA.forEach(c => {
-  const claimId  = c.Claim_ID || c.ID || "-";
-  const claimDate = formatClaimDate(c);
-  const doctor   = c.Doctor?.zc_display_value   || c.Doctor_Name   || "-";
-  const hospital = c.Hospital?.zc_display_value || c.Hospital_Name || "-";
-  const patient  = (getClaimPatientInfo(c) || {}).label || "-";
-
-  const lines = getGroupedByItemLines(c);
-  groupBoundaryRows.push(aoa.length);
-
-  if (!lines.length) {
-    aoa.push([claimId, doctor, hospital, patient, claimDate, "-", "-", "-", "-"]);
-    return;
+  const btn = document.querySelector(".btn-excel");
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.classList.add("loading");
+    btn.innerHTML = `<span class="btn-spinner"></span> Generating Excel...`;
   }
 
-  let i = 0;
-  const itemSpans = new Array(lines.length).fill(null);
-  while (i < lines.length) {
-    const currentItem = getLineItemNumber(lines[i]);
-    let span = 1;
-    while (i + span < lines.length && getLineItemNumber(lines[i + span]) === currentItem) span++;
-    itemSpans[i] = span;
-    i += span;
-  }
+  try {
+    const info = getActiveFilterInfo();
+    const aoa = [];
 
-  lines.forEach((l, idx) => {
-    const itemNo = getLineItemNumber(l);
-    const isFirstOfGroup = itemSpans[idx] !== null;
+    aoa.push(["Claims Turnaround Time Report"]);
+    aoa.push([`Doctor: ${info.doctor || "All"}`]);
+    aoa.push([`Hospital: ${info.hospital || "All"}`]);
+    aoa.push([`Date Range: ${formatDateRange(info.dateFrom, info.dateTo)}`]);
+    aoa.push([`Generated On: ${new Date().toLocaleString("en-AU", {
+      timeZone: "Australia/Sydney",
+      day: "2-digit", month: "short", year: "numeric",
+      hour: "numeric", minute: "2-digit", hour12: true
+    })}`]);
+    aoa.push([]);
 
+    const HEADER_ROW = aoa.length;
     aoa.push([
-      idx === 0 ? claimId   : "",
-      idx === 0 ? doctor    : "",
-      idx === 0 ? hospital  : "",
-      idx === 0 ? patient   : "",
-      idx === 0 ? claimDate : "",
-      isFirstOfGroup ? itemNo : "",
-      getLineDateOfService(l),
-      getLinePaymentDate(l),
-      calcProcessPaymentDays(l)
+      "Claim ID", "Doctor", "Hospital", "Patient", "Payer", "Claim Date",
+      "Item No", "Date of Service", "Payment Date", "Payment Turnaround (Days)"
     ]);
-  });
-});
-  const DATA_END_ROW = aoa.length - 1;
 
-  /* ---------------- BUILD WORKSHEET ---------------- */
+    const DATA_START_ROW = aoa.length;
+    const groupBoundaryRows = [];
 
-  const worksheet = XLSX.utils.aoa_to_sheet(aoa);
-  worksheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } }]; // 9 columns (0-8)
-  worksheet["!cols"] = [
-    { wch: 14 }, { wch: 18 }, { wch: 20 }, { wch: 20 }, { wch: 14 }, // Claim ID, Doctor, Hospital, Patient, Claim Date
-    { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 20 }                // Item No, DoS, Pay Date, Process Payment Days
-  ];
+    FILTERED_DATA.forEach(c => {
+      const claimId   = c.Claim_ID || c.ID || "-";
+      const claimDate = formatClaimDate(c);
+      const doctor    = c.Doctor?.zc_display_value   || c.Doctor_Name   || "-";
+      const hospital  = c.Hospital?.zc_display_value || c.Hospital_Name || "-";
+      const patient   = (getClaimPatientInfo(c) || {}).label || "-";
+      const payerObj  = getClaimPayer(c);
+      const payer     = payerObj ? payerObj.label : (c.Payer?.zc_display_value || c.Payer_Name || "-");
+      const turnaroundDisplay = formatTurnaroundDays(calcPaymentTurnaroundDays(c));
 
-  function setStyle(row, col, style) {
-    const cellRef = XLSX.utils.encode_cell({ r: row, c: col });
-    if (!worksheet[cellRef]) worksheet[cellRef] = { v: "" };
-    worksheet[cellRef].s = style;
-  }
+      const lines = getGroupedByItemLines(c);
+      groupBoundaryRows.push(aoa.length);
 
-  const headerStyle = {
-    font: { bold: true, sz: 10, color: { rgb: XLSX_BRAND.white } },
-    fill: { fgColor: { rgb: XLSX_BRAND.green } },
-    alignment: { horizontal: "center", vertical: "center" },
-    border: {
-      top: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      bottom: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      left: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      right: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } }
-    }
-  };
-  const dataCellStyle = {
-    font: { sz: 9, color: { rgb: XLSX_BRAND.navyText } },
-    border: {
-      top: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      bottom: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      left: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      right: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } }
-    }
-  };
-  const countCellStyle = { ...dataCellStyle, alignment: { horizontal: "right" }, numFmt: "#,##0" };
-  const altRowFill = { fgColor: { rgb: XLSX_BRAND.rowAlt } };
-
-  setStyle(0, 0, { font: { bold: true, sz: 14, color: { rgb: XLSX_BRAND.navy } }, alignment: { horizontal: "center" } });
-  for (let r = 1; r <= 4; r++) setStyle(r, 0, { font: { sz: 9, italic: true, color: { rgb: XLSX_BRAND.navyText } } });
-
-  for (let c = 0; c <= 9; c++) setStyle(HEADER_ROW, c, headerStyle); // 10 columns (0-9)
-
-  for (let r = DATA_START_ROW; r <= DATA_END_ROW; r++) {
-    const isAlt = (r - DATA_START_ROW) % 2 === 1;
-    const isGroupStart = groupBoundaryRows.includes(r);
-    for (let c = 0; c <= 9; c++) { // 10 columns (0-9)
-      let style = isAlt ? { ...dataCellStyle, fill: altRowFill } : dataCellStyle;
-      if (c === 0 || c === 5 || c === 6 || c === 7 || c === 8 || c === 9) style = { ...style, alignment: { horizontal: "center" } };
-      if (isGroupStart) {
-        style = { ...style, border: { ...style.border, top: { style: "medium", color: { rgb: XLSX_BRAND.navy } } } };
+      if (!lines.length) {
+        aoa.push([claimId, doctor, hospital, patient, payer, claimDate, "-", "-", "-", turnaroundDisplay]);
+        return;
       }
-      setStyle(r, c, style);
+
+      let i = 0;
+      const itemSpans = new Array(lines.length).fill(null);
+      while (i < lines.length) {
+        const currentItem = getLineItemNumber(lines[i]);
+        let span = 1;
+        while (i + span < lines.length && getLineItemNumber(lines[i + span]) === currentItem) span++;
+        itemSpans[i] = span;
+        i += span;
+      }
+
+      lines.forEach((l, idx) => {
+        const itemNo = getLineItemNumber(l);
+        const isFirstOfGroup = itemSpans[idx] !== null;
+
+        aoa.push([
+          idx === 0 ? claimId   : "",
+          idx === 0 ? doctor    : "",
+          idx === 0 ? hospital  : "",
+          idx === 0 ? patient   : "",
+          idx === 0 ? payer     : "",
+          idx === 0 ? claimDate : "",
+          isFirstOfGroup ? itemNo : "",
+          getLineDateOfService(l),
+          getLinePaymentDate(l),
+          idx === 0 ? turnaroundDisplay : ""
+        ]);
+      });
+    });
+    const DATA_END_ROW = aoa.length - 1;
+
+    /* ---------------- BUILD WORKSHEET ---------------- */
+
+    const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+    worksheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 9 } }]; // 10 columns (0-9)
+    worksheet["!cols"] = [
+      { wch: 14 }, { wch: 18 }, { wch: 20 }, { wch: 20 }, { wch: 18 }, { wch: 14 }, // Claim ID, Doctor, Hospital, Patient, Payer, Claim Date
+      { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 20 }                             // Item No, DoS, Pay Date, Turnaround Days
+    ];
+
+    function setStyle(row, col, style) {
+      const cellRef = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!worksheet[cellRef]) worksheet[cellRef] = { v: "" };
+      worksheet[cellRef].s = style;
+    }
+
+    const headerStyle = {
+      font: { bold: true, sz: 10, color: { rgb: XLSX_BRAND.white } },
+      fill: { fgColor: { rgb: XLSX_BRAND.green } },
+      alignment: { horizontal: "center", vertical: "center" },
+      border: {
+        top: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
+        bottom: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
+        left: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
+        right: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } }
+      }
+    };
+    const dataCellStyle = {
+      font: { sz: 9, color: { rgb: XLSX_BRAND.navyText } },
+      border: {
+        top: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
+        bottom: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
+        left: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
+        right: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } }
+      }
+    };
+    const altRowFill = { fgColor: { rgb: XLSX_BRAND.rowAlt } };
+
+    setStyle(0, 0, { font: { bold: true, sz: 14, color: { rgb: XLSX_BRAND.navy } }, alignment: { horizontal: "center" } });
+    for (let r = 1; r <= 4; r++) setStyle(r, 0, { font: { sz: 9, italic: true, color: { rgb: XLSX_BRAND.navyText } } });
+
+    for (let c = 0; c <= 9; c++) setStyle(HEADER_ROW, c, headerStyle); // 10 columns (0-9)
+
+    for (let r = DATA_START_ROW; r <= DATA_END_ROW; r++) {
+      const isAlt = (r - DATA_START_ROW) % 2 === 1;
+      const isGroupStart = groupBoundaryRows.includes(r);
+      for (let c = 0; c <= 9; c++) {
+        let style = isAlt ? { ...dataCellStyle, fill: altRowFill } : dataCellStyle;
+        if (c === 0 || c === 5 || c === 6 || c === 7 || c === 8 || c === 9) style = { ...style, alignment: { horizontal: "center" } };
+        if (isGroupStart) {
+          style = { ...style, border: { ...style.border, top: { style: "medium", color: { rgb: XLSX_BRAND.navy } } } };
+        }
+        setStyle(r, c, style);
+      }
+    }
+
+    /* ---------------- SAVE ---------------- */
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Claims Report");
+    const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const excelBlob = new Blob([excelBuffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    });
+    await handleFileExport({
+      blob: excelBlob,
+      filename: "Claims Turnaround Time Report.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      type: "excel"
+    });
+  } catch (err) {
+    console.error("Export Excel error:", err);
+    alert("Error generating Excel report: " + (err.message || err));
+  } finally {
+    if (btn) {
+      setTimeout(() => {
+        btn.classList.remove("loading");
+        btn.innerHTML = origHtml;
+      }, 600);
     }
   }
-
-  /* ---------------- SAVE ---------------- */
-
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Claims Report");
-  XLSX.writeFile(workbook, "Claims Turnaround Time Report.xlsx");
 }
 /**
  * Billing Status Report â€” styled to match the Medi Elves report template.
@@ -2275,101 +2639,129 @@ async function fetchItemsForClaims(claims) {
 async function exportPDF() {
   if (!FILTERED_DATA.length) { alert("No data to export."); return; }
 
-  await loadLogoAsDataURL();
+  const btn = document.querySelector(".btn-pdf");
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.classList.add("loading");
+    btn.innerHTML = `<span class="btn-spinner"></span> Generating PDF...`;
+  }
 
-  const info = getActiveFilterInfo();
-  const { jsPDF } = window.jspdf;
+  showToast("Generating PDF document...");
 
-  const doc = new jsPDF({
-    orientation: "l",   // â¬…ï¸ CHANGED â€” landscape
-    unit: "pt",
-    format: "a4"
-  });
+  try {
+    LOGO_DATA_URL = MEDI_ELVES_LOGO_BASE64;
 
-  const pageW = doc.internal.pageSize.getWidth();   // â¬…ï¸ now ~841.89pt
-  const pageH = doc.internal.pageSize.getHeight();  // â¬…ï¸ now ~595.28pt
-  const margin = 40;
+    const info = getActiveFilterInfo();
+    const { jsPDF } = window.jspdf;
 
-  const headerInfo = {
-    hospital: info.hospital,
-    doctor: info.doctor,
-    date: formatDateRange(info.dateFrom, info.dateTo),
-    generatedOn: new Date().toLocaleString("en-AU", {
-      timeZone: "Australia/Sydney",
-      day: "2-digit", month: "short", year: "numeric",
-      hour: "numeric", minute: "2-digit", hour12: true
-    })
-  };
+    const doc = new jsPDF({
+      orientation: "l",
+      unit: "pt",
+      format: "a4"
+    });
 
-  const HEADER_HEIGHT = 168;
-  const FOOTER_RESERVED = 110;
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 40;
 
-  /* ---------------- MAIN CLAIMS TABLE ---------------- */
-  doc.autoTable({
-    startY: HEADER_HEIGHT,
-    margin: { top: HEADER_HEIGHT, left: margin, right: margin, bottom: FOOTER_RESERVED },
-    theme: "grid",
-    head: [[
-      "Claim ID", "Doctor", "Hospital", "Patient", "Payer", "Claim Date",
-      "Item No", "Date of Service", "Payment Date", "Payment Turnaround (Days)"
-    ]],
-    body: buildPdfBody(),
+    const headerInfo = {
+      hospital: info.hospital,
+      doctor: info.doctor,
+      date: formatDateRange(info.dateFrom, info.dateTo),
+      generatedOn: new Date().toLocaleString("en-AU", {
+        timeZone: "Australia/Sydney",
+        day: "2-digit", month: "short", year: "numeric",
+        hour: "numeric", minute: "2-digit", hour12: true
+      })
+    };
 
-    didParseCell: function (data) {
-      if (data.section !== "body") return;
+    const HEADER_HEIGHT = 168;
+    const FOOTER_RESERVED = 110;
 
-      let lines = (data.cell.text || []).map(stripDob);
+    /* ---------------- MAIN CLAIMS TABLE ---------------- */
+    doc.autoTable({
+      startY: HEADER_HEIGHT,
+      margin: { top: HEADER_HEIGHT, left: margin, right: margin, bottom: FOOTER_RESERVED },
+      theme: "grid",
+      head: [[
+        "Claim ID", "Doctor", "Hospital", "Patient", "Payer", "Claim Date",
+        "Item No", "Date of Service", "Payment Date", "Payment Turnaround (Days)"
+      ]],
+      body: buildPdfBody(),
 
-      if (lines.length > 1 && isDateOnly(lines[lines.length - 1])) {
-        lines = lines.slice(0, -1);
+      didParseCell: function (data) {
+        if (data.section !== "body") return;
+
+        let lines = (data.cell.text || []).map(stripDob);
+
+        if (lines.length > 1 && isDateOnly(lines[lines.length - 1])) {
+          lines = lines.slice(0, -1);
+        }
+
+        data.cell.text = lines;
+
+        if (PDF_GROUP_STARTS.includes(data.row.index)) {
+          data.cell.styles.lineWidth = { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 };
+        }
+      },
+      styles: {
+        fontSize: 7.5,
+        textColor: [0, 0, 0],
+        fillColor: BRAND.white,
+        lineColor: BRAND.lightGrey,
+        lineWidth: 0.5,
+        cellPadding: 4,
+        overflow: "linebreak",
+        valign: "middle"
+      },
+      headStyles: {
+        fillColor: BRAND.navy,
+        textColor: BRAND.white,
+        fontStyle: "bold",
+        fontSize: 7,
+        cellPadding: 5,
+        valign: "middle"
+      },
+      tableWidth: pageW - margin * 2,
+      columnStyles: {
+        0: { cellWidth: 50, halign: "center" },   // Claim ID
+        1: { cellWidth: 78, halign: "left" },     // Doctor
+        2: { cellWidth: 92, halign: "left" },     // Hospital
+        3: { cellWidth: 85, halign: "left" },     // Patient
+        4: { cellWidth: 75, halign: "left" },     // Payer
+        5: { cellWidth: 62, halign: "center" },   // Claim Date
+        6: { cellWidth: 42, halign: "center" },   // Item No
+        7: { cellWidth: 68, halign: "center" },   // Date of Service
+        8: { cellWidth: 68, halign: "center" },   // Payment Date
+        9: { cellWidth: 72, halign: "center" }    // Payment Turnaround (Days)
+      },
+      didDrawPage: () => {
+        drawHeader(doc, pageW, margin, headerInfo);
+        drawFooter(doc, pageW, margin);
       }
+    });
 
-      data.cell.text = lines;
+    drawGrandSummary(doc, pageW, pageH, margin, headerInfo, HEADER_HEIGHT, FOOTER_RESERVED);
 
-      if (PDF_GROUP_STARTS.includes(data.row.index)) {
-        data.cell.styles.lineWidth = { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 };
-      }
-    },
-    styles: {
-      fontSize: 7.5,
-      textColor: [0, 0, 0],
-      fillColor: BRAND.white,
-      lineColor: BRAND.lightGrey,
-      lineWidth: 0.5,
-      cellPadding: 4,
-      overflow: "linebreak",
-      valign: "middle"
-    },
-    headStyles: {
-      fillColor: BRAND.navy,
-      textColor: BRAND.white,
-      fontStyle: "bold",
-      fontSize: 7,
-      cellPadding: 5,
-      valign: "middle"
-    },
-    tableWidth: pageW - margin * 2,
-    columnStyles: {
-      0: { cellWidth: 50, halign: "center" },   // Claim ID
-      1: { cellWidth: 78, halign: "left" },     // Doctor
-      2: { cellWidth: 92, halign: "left" },     // Hospital
-      3: { cellWidth: 85, halign: "left" },     // Patient
-      4: { cellWidth: 75, halign: "left" },     // Payer
-      5: { cellWidth: 62, halign: "center" },   // Claim Date
-      6: { cellWidth: 42, halign: "center" },   // Item No
-      7: { cellWidth: 68, halign: "center" },   // Date of Service
-      8: { cellWidth: 68, halign: "center" },   // Payment Date
-      9: { cellWidth: 72, halign: "center" }    // Payment Turnaround (Days)
-    },
-    didDrawPage: () => {
-      drawHeader(doc, pageW, margin, headerInfo);
-      drawFooter(doc, pageW, margin);
+    const pdfBlob = doc.output("blob");
+
+    await handleFileExport({
+      blob: pdfBlob,
+      filename: "Claims Turnaround Time Report.pdf",
+      mimeType: "application/pdf",
+      type: "pdf"
+    });
+  } catch (err) {
+    console.error("Export PDF error:", err);
+    alert("Error generating PDF report: " + (err.message || err));
+  } finally {
+    if (btn) {
+      setTimeout(() => {
+        btn.classList.remove("loading");
+        btn.innerHTML = origHtml;
+      }, 600);
     }
-  });
-
-
-  /* ---------------- SAVE ---------------- */
-  doc.save("Claims Turnaround Time Report.pdf");
+  }
 }
 
 function drawGrandSummary(doc, pageW, pageH, margin, headerInfo, HEADER_HEIGHT, FOOTER_RESERVED) {
