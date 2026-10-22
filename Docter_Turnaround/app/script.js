@@ -127,6 +127,9 @@ async function zohoGetRecords(config, retries = 4) {
     try {
       return await ZOHO.CREATOR.DATA.getRecords(config);
     } catch (err) {
+      if (isNoRecords(err)) {
+        throw err;
+      }
       if (isRateLimited(err) && attempt < retries) {
         await new Promise(r => setTimeout(r, delay));
         delay *= 2;
@@ -146,7 +149,7 @@ function loadLogoAsDataURL() {
 // "MARIA ANITA FERRER - 29 Sept 1962"  ->  "MARIA ANITA FERRER"
 function stripDob(text) {
   const D = "(?:\\d{1,2}\\s+[A-Za-z]+\\.?,?\\s+\\d{4}|\\d{1,2}[\\/.-]\\d{1,2}[\\/.-]\\d{2,4}|\\d{4}-\\d{2}-\\d{2})";
-  const re = new RegExp("\\s*(?:[-â€“,]\\s+|\\(\\s*)(?:DOB:?\\s*)?" + D + "\\s*\\)?\\s*$", "i");
+  const re = new RegExp("\\s*(?:[-\\u2013\\u2014,]\\s+|\\(\\s*)(?:DOB:?\\s*)?" + D + "\\s*\\)?\\s*$", "i");
   return String(text || "").replace(re, "").trim();
 }
 
@@ -164,7 +167,7 @@ function toLabel(v) {
 
 // "1234 - Some description" -> "1234"
 function normItemKey(v) {
-  return String(v || "").split(/\s[-â€“]\s/)[0].trim().toLowerCase();
+  return String(v || "").split(/\s[-\u2013\u2014]\s/)[0].trim().toLowerCase();
 }
 function parseZohoDate(dateStr) {
   if (!dateStr) return null;
@@ -190,6 +193,20 @@ function parseZohoDate(dateStr) {
     const day = parseInt(ymdMatch[3], 10);
     const d = new Date(year, month, day);
     return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Handle DD-MMM-YYYY or DD MMM YYYY (e.g. "15-Oct-2026", "29 Sept 1962") - standard in Zoho Creator & Safari
+  const dMmmYMatch = str.match(/^(\d{1,2})[\s\/-]([A-Za-z]+)[\s\/-](\d{4})/);
+  if (dMmmYMatch) {
+    const day = parseInt(dMmmYMatch[1], 10);
+    const mStr = dMmmYMatch[2].toLowerCase();
+    const year = parseInt(dMmmYMatch[3], 10);
+    const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
+    const month = months[mStr.slice(0, 3)] ?? (mStr === "sept" ? 8 : undefined);
+    if (month !== undefined) {
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return d;
+    }
   }
 
   // Handle "28 Sept 2026" or "28-Sept-2026" -> normalize "Sept" to "Sep"
@@ -250,12 +267,22 @@ document.addEventListener("DOMContentLoaded", async function () {
   try {
     if (typeof ZOHO === "undefined") {
       console.error("ZOHO SDK not loaded");
+      setLoadingProgress(100, "Error: Zoho SDK not loaded");
       return;
     }
 
     console.time("total load");
 
-    /* 0) Get Logged-in User Email */
+    /* Step 0: Initialize Zoho SDK & Identify Logged-in User Email */
+    setLoadingProgress(5, "Connecting to Zoho Creator...");
+    try {
+      if (window.ZOHO?.CREATOR?.init && typeof window.ZOHO.CREATOR.init === "function") {
+        await window.ZOHO.CREATOR.init();
+      }
+    } catch (initErr) {
+      console.warn("ZOHO.CREATOR.init notice:", initErr);
+    }
+
     let initParams = null;
     try {
       if (window.ZOHO?.CREATOR?.UTIL && typeof ZOHO.CREATOR.UTIL.getInitParams === "function") {
@@ -272,19 +299,25 @@ document.addEventListener("DOMContentLoaded", async function () {
       CURRENT_USER_EMAIL = (urlParams.get("loginUser") || urlParams.get("user") || urlParams.get("email") || "").trim();
     }
 
-    setLoadingProgress(15, "Identifying doctor profile");
+    /* --------------------------------------------------------------------------
+       STRICTLY SEQUENTIAL API EXECUTION FLOW (iPhone / iOS Safari Optimized)
+       API 1 -> Process -> API 2 -> Process -> API 3 -> Process -> API 4 -> ...
+       -------------------------------------------------------------------------- */
 
-    /* 1) Fetch doctors & mappings to identify current doctor */
-    // Primary report requested: #Report:Portal_Doctors1, with fallback to Doctors1 and All_Doctors
-    const [allDoctors, allHospitals, allMappings] = await Promise.all([
-      fetchRecordsWithFallback("Portal_Doctors1", "Doctors1", "All_Doctors"),
-      fetchAllRecords("All_Hospitals"),
-      fetchRecordsWithFallback("Doctor_Hospital_Mappings", "All_Doctor_Hospital_Mappings1")
-    ]);
+    /* [API 1]: Fetch doctor profiles sequentially */
+    setLoadingProgress(15, "Identifying doctor profile...");
+    let allDoctors = [];
+    try {
+      allDoctors = await fetchRecordsWithFallback("Portal_Doctors1", "Doctors1", "All_Doctors");
+      if (!Array.isArray(allDoctors)) allDoctors = [];
+    } catch (docErr) {
+      console.warn("API 1 (Doctors) failed:", docErr);
+      allDoctors = [];
+    }
 
-    // Match doctor by loginUser email: login user id = #Report:Portal_Doctors1 Email
+    // Process API 1 data
     let myDoctor = null;
-    if (CURRENT_USER_EMAIL) {
+    if (CURRENT_USER_EMAIL && allDoctors.length) {
       const emailLower = CURRENT_USER_EMAIL.toLowerCase();
       myDoctor = allDoctors.find(d => {
         const docEmail = getDoctorEmail(d);
@@ -321,27 +354,44 @@ document.addEventListener("DOMContentLoaded", async function () {
       }
     }
 
-    setLoadingProgress(35, "Fetching claims for doctor");
+    /* [API 2]: Fetch claims for doctor sequentially */
+    setLoadingProgress(35, "Fetching claims for doctor...");
+    let allClaims = [];
+    try {
+      allClaims = await fetchRecordsWithFallback("Add_Claim_Report", "Doctors_Claim_Report");
+      if (!Array.isArray(allClaims)) allClaims = [];
+    } catch (claimsErr) {
+      console.warn("API 2 (Claims) failed:", claimsErr);
+      allClaims = [];
+    }
 
-    /* 2) Fetch claims: #Report:Add_Claim_Report (fallback Doctors_Claim_Report) */
-    const allClaims = await fetchRecordsWithFallback("Add_Claim_Report", "Doctors_Claim_Report");
-
-    // Filter claims: #Report:Portal_Doctors1 = #Report:Add_Claim_Report Doctor
+    // Process API 2 data
     let claims = allClaims;
     if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
       claims = allClaims.filter(c => isClaimForDoctor(c, CURRENT_DOCTOR_ID, CURRENT_DOCTOR_NAME));
     } else if (CURRENT_USER_EMAIL) {
-      // Portal user logged in but no doctor profile matched: show no claims
       claims = [];
     }
     ALL_CLAIMS = claims;
     FILTERED_DATA = claims;
 
-    /* 3) Build doctor-hospital mappings & set allowed hospitals */
+    /* [API 3]: Fetch doctor-hospital mappings sequentially */
+    setLoadingProgress(50, "Fetching hospital mappings...");
+    let allMappings = [];
+    try {
+      allMappings = await fetchRecordsWithFallback("Doctor_Hospital_Mappings", "All_Doctor_Hospital_Mappings1");
+      if (!Array.isArray(allMappings)) allMappings = [];
+    } catch (mapErr) {
+      console.warn("API 3 (Mappings) failed:", mapErr);
+      allMappings = [];
+    }
+
+    // Process API 3 data
     buildDoctorHospitalMap(allMappings);
 
+    let docHospitals = [];
     if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
-      let docHospitals = (CURRENT_DOCTOR_ID && DOCTOR_HOSPITAL_MAP[String(CURRENT_DOCTOR_ID)])
+      docHospitals = (CURRENT_DOCTOR_ID && DOCTOR_HOSPITAL_MAP[String(CURRENT_DOCTOR_ID)])
         ? DOCTOR_HOSPITAL_MAP[String(CURRENT_DOCTOR_ID)]
         : [];
 
@@ -349,7 +399,7 @@ document.addEventListener("DOMContentLoaded", async function () {
         docHospitals = DOCTOR_HOSPITAL_MAP[CURRENT_DOCTOR_NAME.trim().toLowerCase()];
       }
 
-      // If no hospital mappings found, extract active hospitals directly from doctor's claims
+      // If no hospital mappings found in table, extract active hospitals directly from doctor's claims
       if (docHospitals.length === 0) {
         const seenH = new Set();
         const extracted = [];
@@ -366,33 +416,65 @@ document.addEventListener("DOMContentLoaded", async function () {
 
       ALLOWED_HOSPITALS = docHospitals;
       ALL_HOSPITALS = ALLOWED_HOSPITALS;
-    } else {
-      ALL_HOSPITALS = allHospitals.map(hos => ({
-        value: String(hos.ID),
-        label: hos.Hospital_Name || hos.zc_display_value
-      }));
+    }
+
+    // Only if still no hospitals resolved, sequentially fetch All_Hospitals as fallback
+    if (!ALL_HOSPITALS || !ALL_HOSPITALS.length) {
+      try {
+        const allHospitals = await fetchAllRecords("All_Hospitals");
+        if (Array.isArray(allHospitals) && allHospitals.length) {
+          ALL_HOSPITALS = allHospitals.map(hos => ({
+            value: String(hos.ID),
+            label: hos.Hospital_Name || hos.zc_display_value || "Hospital"
+          }));
+        }
+      } catch (hospErr) {
+        console.warn("Fallback All_Hospitals fetch failed:", hospErr);
+      }
     }
     populateHospitals(ALL_HOSPITALS);
 
-    setLoadingProgress(55, "Loading patients and items");
+    /* [API 4]: Fetch patients sequentially */
+    setLoadingProgress(65, "Fetching patient information...");
+    let patients = [];
+    try {
+      patients = await fetchRecordsWithFallback("My_Patients", "Add_Patient_Report");
+      if (!Array.isArray(patients)) patients = [];
+    } catch (patErr) {
+      console.warn("API 4 (Patients) failed:", patErr);
+      patients = [];
+    }
 
-    /* 4) Fetch patients & items in parallel */
-    const [items, patients] = await Promise.all([
-      fetchItemsForClaims(claims),
-      fetchRecordsWithFallback("My_Patients", "Add_Patient_Report"),
-      loadInitialItemNumbers()   // seeds the Item Number filter with 200 records only
-    ]);
-    setLoadingProgress(75, "Building lookup maps");
-
-    /* 5) Lookup maps (before rendering) */
-    buildItemTypeMap(items);
+    // Process API 4 data
     buildPatientPayerMap(patients);
     buildPatientInfoMap(patients);
-    setLoadingProgress(90, "Rendering report");
-
-    /* 6) Filters + table: strictly doctor-scoped */
     populatePayers(claims);
     populatePatients(patients, claims);
+
+    /* [API 5]: Fetch items used by doctor's claims sequentially */
+    setLoadingProgress(80, "Loading claim items...");
+    let items = [];
+    try {
+      items = await fetchItemsForClaims(claims);
+      if (!Array.isArray(items)) items = [];
+    } catch (itemsErr) {
+      console.warn("API 5 (Items for claims) failed:", itemsErr);
+      items = [];
+    }
+
+    // Process API 5 data
+    buildItemTypeMap(items);
+
+    /* [API 6]: Seed item number filter options sequentially */
+    setLoadingProgress(92, "Setting up filter options...");
+    try {
+      await loadInitialItemNumbers();
+    } catch (seedErr) {
+      console.warn("API 6 (Initial item numbers) notice:", seedErr);
+    }
+
+    /* Final Step: Render dashboard */
+    setLoadingProgress(98, "Rendering report...");
 
     // Apply initial Fully Paid filter
     FILTERED_DATA = ALL_CLAIMS.filter(c => {
@@ -404,7 +486,12 @@ document.addEventListener("DOMContentLoaded", async function () {
     console.timeEnd("total load");
 
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Critical error loading report:", error);
+    if (ALL_CLAIMS && ALL_CLAIMS.length) {
+      renderTable(ALL_CLAIMS);
+    } else {
+      renderTable([]);
+    }
   } finally {
     hideLoading();
   }
@@ -418,29 +505,38 @@ document.addEventListener("DOMContentLoaded", async function () {
 // Fetch just the first 200 items to seed the dropdown quickly
 async function loadInitialItemNumbers() {
   try {
-    const resp = await ZOHO.CREATOR.DATA.getRecords({
+    const resp = await zohoGetRecords({
       report_name: "Items",
       field_config: "custom",
       fields: ITEM_FIELDS,   // "Item,Type_field,Description"
       max_records: 200
     });
     setItemNumberOptions(resp.data || []);
+    return resp.data || [];
   } catch (err) {
+    if (isNoRecords(err)) {
+      setItemNumberOptions([]);
+      return [];
+    }
     console.warn("Custom-field initial item load failed, retrying with all fields:", err);
     try {
-      const resp = await ZOHO.CREATOR.DATA.getRecords({
+      const resp = await zohoGetRecords({
         report_name: "Items",
         field_config: "all",
         max_records: 200
       });
       setItemNumberOptions(resp.data || []);
+      return resp.data || [];
     } catch (err2) {
-      console.error("Failed to load initial item numbers entirely:", err2);
+      if (!isNoRecords(err2)) {
+        console.error("Failed to load initial item numbers entirely:", err2);
+      }
+      setItemNumberOptions([]);
+      return [];
     }
   }
 }
 
-// Called on search input (debounced) to query the server for matches
 // Called on search input (debounced) to query the server for matches
 async function searchItemNumbersRemote(query) {
   const wrapper = document.getElementById("f-itemnumber");
@@ -2692,12 +2788,8 @@ function resetFilters() {
    =================================================== */
 
 // How many item IDs go into one request (keeps the criteria string short)
-const ITEM_FETCH_BATCH_SIZE  = 40;
-// How many batch requests run at the same time
-const ITEM_FETCH_CONCURRENCY = 5;
+const ITEM_FETCH_BATCH_SIZE = 40;
 // Only these fields are pulled from Items (ID is always included).
-// Change "Type_field" if your type field has a different API name.
-// Only these fields are pulled from Add_Item_Report (ID is always included).
 const ITEM_FIELDS = "Item,Type_field,Description";
 
 // Generic paginated fetch (for reports that are large but not huge)
@@ -2716,10 +2808,11 @@ async function fetchAllRecords(reportName, extraConfig = {}) {
 
     let resp;
     try {
-      resp = await ZOHO.CREATOR.DATA.getRecords(config);
+      resp = await zohoGetRecords(config);
     } catch (err) {
-      // Zoho rejects with "no records found" when a report is empty
-      console.warn(`fetchAllRecords(${reportName}) stopped:`, err);
+      if (!isNoRecords(err)) {
+        console.warn(`fetchAllRecords(${reportName}) stopped:`, err);
+      }
       break;
     }
 
@@ -2750,7 +2843,7 @@ async function fetchRecordsWithFallback(...args) {
     try {
       console.log(`Fetching records from report: ${rep}...`);
       const records = await fetchAllRecords(rep, extraConfig);
-      if (records && records.length > 0) {
+      if (Array.isArray(records) && records.length > 0) {
         console.log(`Successfully fetched ${records.length} records from ${rep}`);
         return records;
       }
@@ -2771,7 +2864,7 @@ function getLineItemRef(l) {
 // Unique item IDs used by the given claims
 function collectClaimItemIds(claims) {
   const ids = new Set();
-  claims.forEach(c => {
+  (claims || []).forEach(c => {
     getClaimLines(c).forEach(l => {
       const ref = getLineItemRef(l);
       if (ref && ref.ID) ids.add(String(ref.ID));
@@ -2783,6 +2876,7 @@ function collectClaimItemIds(claims) {
 
 // Fetch one batch of items by ID
 async function fetchItemBatch(idBatch) {
+  if (!idBatch || !idBatch.length) return [];
   const criteria = "(" + idBatch.map(id => `ID == ${id}`).join(" || ") + ")";
   const base = {
     report_name: "Items",
@@ -2792,25 +2886,28 @@ async function fetchItemBatch(idBatch) {
 
   try {
     // Fast path: only the fields we need
-    const resp = await ZOHO.CREATOR.DATA.getRecords({
+    const resp = await zohoGetRecords({
       ...base,
       field_config: "custom",
       fields: ITEM_FIELDS
     });
     return resp.data || [];
   } catch (err) {
+    if (isNoRecords(err)) return [];
     console.warn("Custom-field fetch failed, retrying with all fields:", err);
     try {
-      const resp = await ZOHO.CREATOR.DATA.getRecords({ ...base, field_config: "all" });
+      const resp = await zohoGetRecords({ ...base, field_config: "all" });
       return resp.data || [];
     } catch (err2) {
-      console.error("Item batch failed:", err2);
+      if (!isNoRecords(err2)) {
+        console.error("Item batch failed:", err2);
+      }
       return [];
     }
   }
 }
 
-// Fetch ONLY the items that appear in the claims, in parallel batches
+// Fetch ONLY the items that appear in the claims, in strictly sequential batches
 async function fetchItemsForClaims(claims) {
   const ids = collectClaimItemIds(claims);
   console.log(`Fetching ${ids.length} unique items used by claims...`);
@@ -2821,22 +2918,20 @@ async function fetchItemsForClaims(claims) {
     batches.push(ids.slice(i, i + ITEM_FETCH_BATCH_SIZE));
   }
 
-  const results = new Array(batches.length);
-  let next = 0;
-
-  // Simple worker pool: N workers each pull the next batch until none are left
-  async function worker() {
-    while (next < batches.length) {
-      const idx = next++;
-      results[idx] = await fetchItemBatch(batches[idx]);
+  const items = [];
+  // Strictly sequential execution — one request at a time
+  for (let i = 0; i < batches.length; i++) {
+    try {
+      const batchResult = await fetchItemBatch(batches[i]);
+      if (Array.isArray(batchResult) && batchResult.length) {
+        items.push(...batchResult);
+      }
+    } catch (batchErr) {
+      console.warn(`Item batch ${i + 1}/${batches.length} failed:`, batchErr);
     }
   }
 
-  const workerCount = Math.min(ITEM_FETCH_CONCURRENCY, batches.length);
-  await Promise.all(Array.from({ length: workerCount }, worker));
-
-  const items = results.flat();
-  console.log(`Fetched ${items.length} item records in ${batches.length} requests`);
+  console.log(`Fetched ${items.length} item records in ${batches.length} sequential requests`);
   return items;
 }
 
